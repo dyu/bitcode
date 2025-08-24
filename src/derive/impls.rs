@@ -33,6 +33,13 @@ impl_both!(bool, BoolEncoder, BoolDecoder);
 impl_both!(f32, F32Encoder, F32Decoder);
 impl_both!(String, StrEncoder, StrDecoder);
 
+impl Encode for ::alloc::borrow::Cow<'_, str> {
+    type Encoder = StrEncoder;
+}
+impl<'a> Decode<'a> for ::alloc::borrow::Cow<'a, str> {
+    type Decoder = StrDecoder<'a>;
+}
+
 macro_rules! impl_int {
     ($($t:ty),+) => {
         $(

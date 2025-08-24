@@ -57,6 +57,21 @@ impl<'b> Encoder<&'b str> for StrEncoder {
     }
 }
 
+impl<'b> Encoder<::alloc::borrow::Cow<'b, str>> for StrEncoder {
+    #[inline(always)]
+    fn encode(&mut self, t: &::alloc::borrow::Cow<'_, str>) {
+        self.encode(t.as_ref());
+    }
+
+    #[inline(always)]
+    fn encode_vectored<'a>(&mut self, i: impl Iterator<Item = &'a ::alloc::borrow::Cow<'b, str>> + Clone)
+    where
+        &'b str: 'a,
+    {
+        self.encode_vectored(i.map(::alloc::borrow::Cow::as_ref));
+    }
+}
+
 impl Encoder<String> for StrEncoder {
     #[inline(always)]
     fn encode(&mut self, t: &String) {
@@ -128,6 +143,13 @@ impl<'a> Decoder<'a, &'a str> for StrDecoder<'a> {
         // Safety: `bytes` is valid UTF-8 because populate checked that `self.strings` is valid UTF-8
         // and that every sub string starts and ends on char boundaries.
         unsafe { from_utf8_unchecked(bytes) }
+    }
+}
+
+impl<'a> Decoder<'a, ::alloc::borrow::Cow<'a, str>> for StrDecoder<'a> {
+    #[inline(always)]
+    fn decode(&mut self) -> ::alloc::borrow::Cow<'a, str> {
+        ::alloc::borrow::Cow::Borrowed(self.decode())
     }
 }
 
