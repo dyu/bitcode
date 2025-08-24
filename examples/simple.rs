@@ -1,8 +1,17 @@
 use std::borrow::Cow;
 use bitcode::{Encode, Decode};
 
-#[derive(Encode, Decode, PartialEq, Debug)]
+#[derive(Encode, Decode, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum Size {
+    SMALL,
+    MEDIUM,
+    LARGE,
+}
+
+#[derive(Encode, Decode, PartialEq, Eq, Debug)]
 struct Foo<'a> {
+    s: Size,
     x: u32,
     y: &'a str,
     z: Cow<'a, str>,
@@ -11,6 +20,7 @@ struct Foo<'a> {
 
 fn main() {
     let original = Foo {
+        s: Size::MEDIUM,
         x: 10,
         y: "abc",
         z: "gg".into(),
