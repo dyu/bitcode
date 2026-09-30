@@ -1,4 +1,6 @@
-use crate::attribute::BitcodeAttrs;
+use crate::attribute::{
+    BitcodeDeriveAttrs, BitcodeDeriveOrVariantAttrs, BitcodeFieldAttrs, BitcodeVariantAttrs,
+};
 use crate::bound::FieldBounds;
 use crate::err;
 use proc_macro2::{Ident, Span, TokenStream};
@@ -9,20 +11,70 @@ use syn::{
     Result, Type, WherePredicate,
 };
 
-type VariantIndex = u8;
-pub fn variant_index(i: usize) -> VariantIndex {
-    i.try_into().unwrap()
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum VariantIndexType {
+    U8,
+    U16,
+}
+
+impl VariantIndexType {
+    pub fn new(variant_count: usize, ident: &Ident) -> Result<Self> {
+        for candidate in [Self::U8, Self::U16] {
+            if variant_count <= candidate.max_variants() {
+                return Ok(candidate);
+            }
+        }
+        err(
+            &ident,
+            &format!(
+                "enums with more than {} variants are not supported",
+                Self::U16.max_variants()
+            ),
+        )
+    }
+
+    fn max_variants(self) -> usize {
+        (match self {
+            Self::U8 => u8::MAX as usize,
+            Self::U16 => u16::MAX as usize,
+        }) + 1
+    }
+
+    pub fn instance_to_tokens(self, index: usize) -> TokenStream {
+        match self {
+            Self::U8 => {
+                let n: u8 = index.try_into().unwrap();
+                quote! {#n}
+            }
+            Self::U16 => {
+                let n: u16 = index.try_into().unwrap();
+                quote! {#n}
+            }
+        }
+    }
+}
+
+impl ToTokens for VariantIndexType {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        use quote::TokenStreamExt;
+        tokens.append(Ident::new(
+            match self {
+                Self::U8 => "u8",
+                Self::U16 => "u16",
+            },
+            Span::call_site(),
+        ));
+    }
 }
 
 pub trait Item: Copy + Sized {
     fn field_impl(
         self,
-        crate_name: &Path,
+        attrs: &BitcodeFieldAttrs,
         field_name: TokenStream,
         global_field_name: TokenStream,
         real_field_name: TokenStream,
         field_type: &Type,
-        field_attrs: &BitcodeAttrs,
     ) -> TokenStream;
 
     fn struct_impl(
@@ -34,18 +86,18 @@ pub trait Item: Copy + Sized {
 
     fn enum_impl(
         self,
-        crate_name: &Path,
+        attrs: &BitcodeDeriveAttrs,
         variant_count: usize,
+        variant_index_type: VariantIndexType,
         pattern: impl Fn(usize) -> TokenStream,
         inner: impl Fn(Self, usize) -> TokenStream,
     ) -> TokenStream;
 
     fn field_impls(
         self,
-        crate_name: &Path,
+        attrs: &[BitcodeFieldAttrs],
         global_prefix: Option<&str>,
         fields: &Fields,
-        attrs: &Vec<BitcodeAttrs>,
     ) -> TokenStream {
         fields
             .iter()
@@ -62,7 +114,7 @@ pub trait Item: Copy + Sized {
                     })
                     .unwrap_or_else(|| name.clone());
 
-                self.field_impl(crate_name, name, global_name, real_name, &field.ty, attrs)
+                self.field_impl(attrs, name, global_name, real_name, &field.ty)
             })
             .collect()
     }
@@ -73,7 +125,7 @@ pub trait Derive<const ITEM_COUNT: usize> {
     const ALL: [Self::Item; ITEM_COUNT];
 
     /// `Encode` in `T: Encode`.
-    fn bound(&self, crate_name: &Path) -> Path;
+    fn bound(&self, attrs: &BitcodeDeriveAttrs) -> Path;
 
     /// Bound for skipped fields, e.g. `Default`
     fn skip_bound(&self) -> Option<Path>;
@@ -81,28 +133,27 @@ pub trait Derive<const ITEM_COUNT: usize> {
     /// Generates the derive implementation.
     fn derive_impl(
         &self,
-        crate_name: &Path,
+        attrs: &BitcodeDeriveAttrs,
         output: [TokenStream; ITEM_COUNT],
         ident: Ident,
         generics: Generics,
         any_static_borrow: bool,
     ) -> TokenStream;
 
-    fn field_attrs(
+    fn field_attrs<'attr>(
         &self,
-        crate_name: &Path,
+        attrs: BitcodeDeriveOrVariantAttrs<'attr>,
         fields: &Fields,
-        attrs: &BitcodeAttrs,
         bounds: &mut FieldBounds,
-    ) -> Result<Vec<BitcodeAttrs>> {
+    ) -> Result<Vec<BitcodeFieldAttrs<'attr>>> {
         fields
             .iter()
-            .map(|field| {
-                let field_attrs = BitcodeAttrs::parse_field(&field.attrs, attrs)?;
+            .map(move |field| {
+                let field_attrs = BitcodeFieldAttrs::parse(&field.attrs, attrs)?;
                 let bound = if field_attrs.skip {
                     self.skip_bound()
                 } else {
-                    Some(self.bound(crate_name))
+                    Some(self.bound(&attrs))
                 };
                 if let Some(bound) = bound {
                     bounds.add_bound_type(field.clone(), &field_attrs, bound);
@@ -113,7 +164,7 @@ pub trait Derive<const ITEM_COUNT: usize> {
     }
 
     fn derive(&self, mut input: DeriveInput) -> Result<TokenStream> {
-        let attrs = BitcodeAttrs::parse_derive(&input.attrs)?;
+        let attrs = BitcodeDeriveAttrs::parse(&input.attrs)?;
         let ident = input.ident;
         syn::visit_mut::visit_data_mut(&mut ReplaceSelves(&ident), &mut input.data);
         let mut bounds = FieldBounds::default();
@@ -121,39 +172,60 @@ pub trait Derive<const ITEM_COUNT: usize> {
         let output = match input.data {
             Data::Struct(DataStruct { ref fields, .. }) => {
                 // Used for adding `bounds` and skipping fields. Would be used by `#[bitcode(with_serde)]`.
-                let field_attrs =
-                    self.field_attrs(&attrs.crate_name, fields, &attrs, &mut bounds)?;
+                let field_attrs = self.field_attrs(
+                    BitcodeDeriveOrVariantAttrs::Derive(&attrs),
+                    fields,
+                    &mut bounds,
+                )?;
 
                 let destructure_fields = &destructure_fields(fields);
                 Self::ALL.map(|item| {
-                    let field_impls =
-                        item.field_impls(&attrs.crate_name, None, fields, &field_attrs);
+                    let field_impls = item.field_impls(&field_attrs, None, fields);
                     item.struct_impl(&ident, destructure_fields, &field_impls)
                 })
             }
             Data::Enum(data_enum) => {
-                let max_variants = VariantIndex::MAX as usize + 1;
-                if data_enum.variants.len() > max_variants {
-                    return err(
-                        &ident,
-                        &format!("enums with more than {max_variants} variants are not supported"),
-                    );
+                let variant_index_type = VariantIndexType::new(data_enum.variants.len(), &ident)?;
+
+                if variant_index_type != VariantIndexType::U8 {
+                    for variant in &data_enum.variants {
+                        if !variant.fields.is_empty() {
+                            return err(
+                                &ident,
+                                &format!(
+                                    "enums with more than {} variants must not have any variants with fields",
+                                    VariantIndexType::U8.max_variants()
+                                ),
+                            );
+                        }
+                    }
                 }
 
                 // Used for adding `bounds` and skipping fields. Would be used by `#[bitcode(with_serde)]`.
-                let variant_attrs = data_enum
+                let variants_with_attrs = data_enum
                     .variants
                     .iter()
                     .map(|variant| {
-                        let attrs = BitcodeAttrs::parse_variant(&variant.attrs, &attrs)?;
-                        self.field_attrs(&attrs.crate_name, &variant.fields, &attrs, &mut bounds)
+                        let variant_attrs = BitcodeVariantAttrs::parse(&variant.attrs, &attrs)?;
+                        Ok((variant, variant_attrs))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let variant_field_attrs = variants_with_attrs
+                    .iter()
+                    .map(|(variant, variant_attrs)| {
+                        self.field_attrs(
+                            BitcodeDeriveOrVariantAttrs::Variant(&variant_attrs),
+                            &variant.fields,
+                            &mut bounds,
+                        )
                     })
                     .collect::<Result<Vec<_>>>()?;
 
                 Self::ALL.map(|item| {
                     item.enum_impl(
-                        &attrs.crate_name,
+                        &attrs,
                         data_enum.variants.len(),
+                        variant_index_type,
                         |i| {
                             let variant = &data_enum.variants[i];
                             let variant_name = &variant.ident;
@@ -164,13 +236,12 @@ pub trait Derive<const ITEM_COUNT: usize> {
                         },
                         |item, i| {
                             let variant = &data_enum.variants[i];
-                            let variant_attrs = &variant_attrs[i];
+                            let variant_field_attrs = &variant_field_attrs[i];
                             let global_prefix = format!("{}_", &variant.ident);
                             item.field_impls(
-                                &attrs.crate_name,
+                                variant_field_attrs,
                                 Some(&global_prefix),
                                 &variant.fields,
-                                variant_attrs,
                             )
                         },
                     )
@@ -179,13 +250,7 @@ pub trait Derive<const ITEM_COUNT: usize> {
             Data::Union(_) => err(&ident, "unions are not supported")?,
         };
         let (generics, any_static_borrow) = bounds.added_to(input.generics);
-        Ok(self.derive_impl(
-            &attrs.crate_name,
-            output,
-            ident,
-            generics,
-            any_static_borrow,
-        ))
+        Ok(self.derive_impl(&attrs, output, ident, generics, any_static_borrow))
     }
 }
 

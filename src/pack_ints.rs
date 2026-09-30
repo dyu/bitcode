@@ -3,6 +3,7 @@ use crate::consume::{consume_byte, consume_byte_arrays};
 use crate::error::error;
 use crate::fast::CowSlice;
 use crate::pack::{invalid_packing, pack_bytes, unpack_bytes};
+use crate::pack_shared::PackingTrait;
 use crate::Error;
 use alloc::vec::Vec;
 use bytemuck::Pod;
@@ -19,7 +20,7 @@ enum Packing {
     _8,
 }
 
-impl Packing {
+impl PackingTrait for Packing {
     fn new<T: SizedUInt>(max: T) -> Self {
         let max: u128 = max.try_into().unwrap_or_else(|_| unreachable!()); // From<usize> isn't implemented for u128.
         #[allow(clippy::match_overlapping_arm)] // Just make sure not to reorder them.
@@ -37,7 +38,9 @@ impl Packing {
         // Also makes no packing with offset_by_min = true is unrepresentable.
         out.push((self as u8 - Self::new(T::MAX) as u8) * 2 - offset_by_min as u8);
     }
+}
 
+impl Packing {
     fn read<T: SizedUInt>(input: &mut &[u8]) -> Result<(Self, bool)> {
         let v = consume_byte(input)?;
         let p_u8 = crate::nightly::div_ceil_u8(v, 2) + Self::new(T::MAX) as u8;
@@ -236,19 +239,21 @@ macro_rules! impl_smaller {
 // Scratch space to bridge gap between pack_ints and pack_bytes.
 // In theory, we could avoid this intermediate step, but it would result in a lot of generated code.
 #[cfg(feature = "std")]
-fn with_scratch<T>(f: impl FnOnce(&mut Vec<u8>) -> T) -> T {
+fn with_scratch<T>(mut f: impl FnMut(&mut Vec<u8>) -> T) -> T {
     thread_local! {
         static SCRATCH: core::cell::RefCell<Vec<u8>> = const { core::cell::RefCell::new(Vec::new()) }
     }
-    SCRATCH.with(|s| {
-        let s = &mut s.borrow_mut();
-        s.clear();
-        f(s)
-    })
+    SCRATCH
+        .try_with(|s| {
+            let s = &mut s.borrow_mut();
+            s.clear();
+            f(s)
+        })
+        .unwrap_or_else(|_| f(&mut Vec::new()))
 }
 // Resort to allocation.
 #[cfg(not(feature = "std"))]
-fn with_scratch<T>(f: impl FnOnce(&mut Vec<u8>) -> T) -> T {
+fn with_scratch<T>(mut f: impl FnMut(&mut Vec<u8>) -> T) -> T {
     f(&mut Vec::new())
 }
 
@@ -327,18 +332,8 @@ impl SizedUInt for u8 {
     }
 }
 
-pub fn minmax<T: SizedInt>(v: &[T]) -> (T, T) {
-    let mut min = T::MAX;
-    let mut max = T::MIN;
-    for &v in v.iter() {
-        min = min.min(v);
-        max = max.max(v);
-    }
-    (min, max)
-}
-
 fn skip_packing<T: SizedInt>(length: usize) -> bool {
-    // Be careful using size_of::<T> since usize can be 4 or 8.
+    // T is SizedInt, so it cannot be usize/isize, therefore comparisions against size are safe.
     if core::mem::size_of::<T>() == 1 {
         return true; // u8s can't be packed by pack_ints (only pack_bytes).
     }
@@ -368,31 +363,9 @@ fn pack_ints_sized<T: SizedInt>(ints: &mut [T], out: &mut Vec<u8>) {
     let (basic_packing, min_max) = if skip_packing::<T>(ints.len()) {
         (Packing::new(T::Unsigned::MAX), None)
     } else {
-        // Take a small sample to avoid wastefully scanning the whole slice.
-        let (sample, remaining) = ints.split_at(ints.len().min(16));
-        let (min, max) = minmax(sample);
-
-        // Only have to check packing(max - min) since it's always as good as packing(max).
-        let none = Packing::new(T::Unsigned::MAX);
-        if Packing::new(max.to_unsigned().wrapping_sub(min.to_unsigned())) == none {
-            none.write::<T::Unsigned>(out, false);
-            (none, None)
-        } else {
-            let (remaining_min, remaining_max) = minmax(remaining);
-            let min = min.min(remaining_min);
-            let max = max.max(remaining_max);
-
-            // Signed ints pack as unsigned ints if positive.
-            let basic_packing = if min >= T::default() {
-                Packing::new(max.to_unsigned())
-            } else {
-                none // Any negative can't be packed without offset_packing.
-            };
-            (basic_packing, Some((min, max)))
-        }
+        crate::pack_shared::basic_packing_and_signed_min_max_cast_to_unsigned(ints, out)
     };
     let ints = bytemuck::must_cast_slice_mut(ints);
-    let min_max = min_max.map(|(min, max)| (min.to_unsigned(), max.to_unsigned()));
     pack_ints_sized_unsigned::<T::Unsigned>(ints, out, basic_packing, min_max);
 }
 
@@ -403,24 +376,7 @@ fn pack_ints_sized_unsigned<T: SizedUInt>(
     basic_packing: Packing,
     min_max: Option<(T, T)>,
 ) {
-    let p = if let Some((min, max)) = min_max {
-        // If subtracting min from all ints results in a better packing do it, otherwise don't bother.
-        let offset_packing = Packing::new(max.wrapping_sub(min));
-        if offset_packing > basic_packing && ints.len() > 5 {
-            for b in ints.iter_mut() {
-                *b = b.wrapping_sub(min);
-            }
-            offset_packing.write::<T>(out, true);
-            T::write(min, out);
-            offset_packing
-        } else {
-            basic_packing.write::<T>(out, false);
-            basic_packing
-        }
-    } else {
-        basic_packing
-    };
-
+    let p = crate::pack_shared::offset_packing(ints, out, basic_packing, min_max);
     match p {
         Packing::_128 => T::pack128(ints, out),
         Packing::_64 => T::pack64(ints, out),
