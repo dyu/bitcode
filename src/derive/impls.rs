@@ -32,6 +32,19 @@ impl_both!(bool, BoolEncoder, BoolDecoder);
 impl_both!(f32, F32Encoder, F32Decoder);
 impl_both!(String, StrEncoder, StrDecoder);
 
+impl Encode for &'_ [u8] {
+    type Encoder = StrEncoder;
+}
+impl<'a> Decode<'a> for &'a [u8] {
+    type Decoder = StrDecoder<'a>;
+}
+impl Encode for ::alloc::borrow::Cow<'_, [u8]> {
+    type Encoder = StrEncoder;
+}
+impl<'a> Decode<'a> for ::alloc::borrow::Cow<'a, [u8]> {
+    type Decoder = StrDecoder<'a>;
+}
+
 impl Encode for ::alloc::borrow::Cow<'_, str> {
     type Encoder = StrEncoder;
 }
