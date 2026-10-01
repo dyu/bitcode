@@ -52,11 +52,10 @@ impl Encoder<[u8]> for StrEncoder {
     }
 }
 
-// TODO find a way to remove this shim.
 impl<'b> Encoder<&'b str> for StrEncoder {
     #[inline(always)]
     fn encode(&mut self, t: &&str) {
-        self.encode(*t);
+        self.0.encode(str_as_u8_chars(*t));
     }
 
     #[inline(always)]
@@ -64,7 +63,7 @@ impl<'b> Encoder<&'b str> for StrEncoder {
     where
         &'b str: 'a,
     {
-        self.encode_vectored(i.copied());
+        self.0.encode_vectored(i.map(|e| str_as_u8_chars(*e)));
     }
 }
 impl<'b> Encoder<&'b [u8]> for StrEncoder {
@@ -78,14 +77,14 @@ impl<'b> Encoder<&'b [u8]> for StrEncoder {
     where
         &'b [u8]: 'a,
     {
-        self.0.encode_vectored(i.map(|e| bytemuck::must_cast_slice(e) ));
+        self.0.encode_vectored(i.map(|e| bytemuck::must_cast_slice(*e) ));
     }
 }
 
 impl<'b> Encoder<::alloc::borrow::Cow<'b, str>> for StrEncoder {
     #[inline(always)]
     fn encode(&mut self, t: &::alloc::borrow::Cow<'_, str>) {
-        self.encode(t.as_ref());
+        self.0.encode(str_as_u8_chars(t.as_ref()));
     }
 
     #[inline(always)]
@@ -93,7 +92,7 @@ impl<'b> Encoder<::alloc::borrow::Cow<'b, str>> for StrEncoder {
     where
         &'b str: 'a,
     {
-        self.encode_vectored(i.map(::alloc::borrow::Cow::as_ref));
+        self.0.encode_vectored(i.map(|e| str_as_u8_chars(e.as_ref())));
     }
 }
 impl<'b> Encoder<::alloc::borrow::Cow<'b, [u8]>> for StrEncoder {
