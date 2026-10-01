@@ -40,6 +40,17 @@ impl Encoder<str> for StrEncoder {
         self.0.encode_vectored(i.map(str_as_u8_chars));
     }
 }
+impl Encoder<[u8]> for StrEncoder {
+    #[inline(always)]
+    fn encode(&mut self, t: &[u8]) {
+        self.0.encode(bytemuck::must_cast_slice(t));
+    }
+
+    #[inline(always)]
+    fn encode_vectored<'a>(&mut self, i: impl Iterator<Item = &'a [u8]> + Clone) {
+        self.0.encode_vectored(i.map(bytemuck::must_cast_slice));
+    }
+}
 
 // TODO find a way to remove this shim.
 impl<'b> Encoder<&'b str> for StrEncoder {
@@ -56,6 +67,20 @@ impl<'b> Encoder<&'b str> for StrEncoder {
         self.encode_vectored(i.copied());
     }
 }
+impl<'b> Encoder<&'b [u8]> for StrEncoder {
+    #[inline(always)]
+    fn encode(&mut self, t: &&[u8]) {
+        self.0.encode(bytemuck::must_cast_slice(*t));
+    }
+
+    #[inline(always)]
+    fn encode_vectored<'a>(&mut self, i: impl Iterator<Item = &'a &'b [u8]> + Clone)
+    where
+        &'b [u8]: 'a,
+    {
+        self.0.encode_vectored(i.map(|e| bytemuck::must_cast_slice(e) ));
+    }
+}
 
 impl<'b> Encoder<::alloc::borrow::Cow<'b, str>> for StrEncoder {
     #[inline(always)]
@@ -69,6 +94,20 @@ impl<'b> Encoder<::alloc::borrow::Cow<'b, str>> for StrEncoder {
         &'b str: 'a,
     {
         self.encode_vectored(i.map(::alloc::borrow::Cow::as_ref));
+    }
+}
+impl<'b> Encoder<::alloc::borrow::Cow<'b, [u8]>> for StrEncoder {
+    #[inline(always)]
+    fn encode(&mut self, t: &::alloc::borrow::Cow<'_, [u8]>) {
+        self.0.encode(bytemuck::must_cast_slice(t.as_ref()));
+    }
+
+    #[inline(always)]
+    fn encode_vectored<'a>(&mut self, i: impl Iterator<Item = &'a ::alloc::borrow::Cow<'b, [u8]>> + Clone)
+    where
+        &'b [u8]: 'a,
+    {
+        self.0.encode_vectored(i.map(|e| bytemuck::must_cast_slice(e.as_ref()) ));
     }
 }
 
@@ -145,10 +184,22 @@ impl<'a> Decoder<'a, &'a str> for StrDecoder<'a> {
         unsafe { from_utf8_unchecked(bytes) }
     }
 }
+impl<'a> Decoder<'a, &'a [u8]> for StrDecoder<'a> {
+    #[inline(always)]
+    fn decode(&mut self) -> &'a [u8] {
+        unsafe { self.strings.chunk_unchecked(self.lengths.decode()) }
+    }
+}
 
 impl<'a> Decoder<'a, ::alloc::borrow::Cow<'a, str>> for StrDecoder<'a> {
     #[inline(always)]
     fn decode(&mut self) -> ::alloc::borrow::Cow<'a, str> {
+        ::alloc::borrow::Cow::Borrowed(self.decode())
+    }
+}
+impl<'a> Decoder<'a, ::alloc::borrow::Cow<'a, [u8]>> for StrDecoder<'a> {
+    #[inline(always)]
+    fn decode(&mut self) -> ::alloc::borrow::Cow<'a, [u8]> {
         ::alloc::borrow::Cow::Borrowed(self.decode())
     }
 }

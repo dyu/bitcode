@@ -18,8 +18,12 @@ struct Bar<'a> {
 
 #[derive(Encode, Decode, PartialEq, Debug)]
 struct Foo<'a> {
+    a: u8,
     b: Bar<'a>,
     s: Size,
+    u: &'a [u8],
+    v: Cow<'a, [u8]>,
+    v_list: Vec<Cow<'a, [u8]>>,
     x: u32,
     y: &'a str,
     z: Cow<'a, str>,
@@ -28,8 +32,15 @@ struct Foo<'a> {
 
 fn main() {
     let original = Foo {
+        a: 1,
         b: Bar { f: 1.5, d: 10.05, s: "bar" },
         s: Size::MEDIUM,
+        u: b"\x01\x02hello",
+        v: b"\x03\x04world".into(),
+        v_list: vec![
+            b"\x01one".into(),
+            b"\x02two".into(),
+        ],
         x: 10,
         y: "abc",
         z: "gg".into(),
